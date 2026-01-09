@@ -32,19 +32,59 @@ class DataCollector:
             Parsed trade dictionary or None if invalid
         """
         try:
-            # Note: Actual field names may vary - adjust based on real API response
-            return {
-                'tx_hash': trade_data.get('id') or trade_data.get('tx_hash'),
-                'wallet_address': trade_data.get('maker') or trade_data.get('taker'),
-                'market_id': trade_data.get('market_id') or trade_data.get('asset_id'),
-                'trade_type': 'buy' if trade_data.get('side') == 'BUY' else 'sell',
-                'token_amount': float(trade_data.get('size', 0)),
-                'shares': float(trade_data.get('outcome_tokens_traded', 0)),
-                'price': float(trade_data.get('price', 0)),
-                'timestamp': datetime.fromtimestamp(
-                    int(trade_data.get('timestamp', 0))
-                ) if trade_data.get('timestamp') else datetime.utcnow()
+            # Extract fields based on actual Polymarket API structure
+            tx_hash = trade_data.get('transactionHash')
+            wallet_address = trade_data.get('proxyWallet')
+
+            # Use slug as market_id (more stable than asset ID)
+            market_id = trade_data.get('slug') or trade_data.get('eventSlug')
+
+            # Skip if missing required fields
+            if not tx_hash or not wallet_address or not market_id:
+                logger.debug(f"Skipping trade with missing required fields")
+                return None
+
+            # Parse trade type
+            side = trade_data.get('side', '').upper()
+            trade_type = 'buy' if side == 'BUY' else 'sell'
+
+            # Parse amounts
+            size = float(trade_data.get('size', 0))
+            price = float(trade_data.get('price', 0))
+
+            # Calculate shares (size * price for the token amount)
+            shares = size
+            token_amount = size  # In USDC/USD
+
+            # Parse timestamp
+            timestamp = datetime.fromtimestamp(
+                int(trade_data.get('timestamp', 0))
+            ) if trade_data.get('timestamp') else datetime.utcnow()
+
+            parsed = {
+                'tx_hash': tx_hash,
+                'wallet_address': wallet_address,
+                'market_id': market_id,
+                'trade_type': trade_type,
+                'token_amount': token_amount,
+                'shares': shares,
+                'price': price,
+                'timestamp': timestamp
             }
+
+            # Also extract embedded market data for later storage
+            parsed['market_data'] = {
+                'market_id': market_id,
+                'title': trade_data.get('title', ''),
+                'category': trade_data.get('category', ''),
+                'slug': market_id,
+                'asset': trade_data.get('asset'),
+                'conditionId': trade_data.get('conditionId'),
+                'outcome': trade_data.get('outcome'),
+                'icon': trade_data.get('icon')
+            }
+
+            return parsed
         except Exception as e:
             logger.error(f"Error parsing trade data: {e}")
             return None
@@ -73,8 +113,9 @@ class DataCollector:
             trade_data['timestamp']
         )
 
-        # Create trade
-        trade = Trade(**trade_data)
+        # Create trade (exclude market_data which is not part of Trade model)
+        trade_fields = {k: v for k, v in trade_data.items() if k != 'market_data'}
+        trade = Trade(**trade_fields)
         self.db.add(trade)
 
         try:
@@ -97,31 +138,57 @@ class DataCollector:
             Parsed market dictionary or None if invalid
         """
         try:
+            # Extract market ID
+            market_id = market_data.get('id') or market_data.get('conditionId')
+            if not market_id:
+                logger.debug("Skipping market with no ID")
+                return None
+
             # Parse dates
             end_date = None
-            if market_data.get('end_date'):
-                end_date = datetime.fromisoformat(
-                    market_data['end_date'].replace('Z', '+00:00')
-                )
+            if market_data.get('endDate'):
+                try:
+                    end_date = datetime.fromisoformat(
+                        market_data['endDate'].replace('Z', '+00:00')
+                    )
+                except:
+                    pass
 
             resolution_date = None
-            if market_data.get('resolution_date'):
-                resolution_date = datetime.fromisoformat(
-                    market_data['resolution_date'].replace('Z', '+00:00')
-                )
+            if market_data.get('resolutionDate'):
+                try:
+                    resolution_date = datetime.fromisoformat(
+                        market_data['resolutionDate'].replace('Z', '+00:00')
+                    )
+                except:
+                    pass
+
+            # Extract title and description
+            title = market_data.get('question') or market_data.get('title', '')
+            description = market_data.get('description', '')
+
+            # Extract category
+            category = market_data.get('category', '')
+
+            # Extract volume and liquidity
+            volume = market_data.get('volume') or market_data.get('liquidity', 0)
+            try:
+                total_volume = float(volume)
+            except:
+                total_volume = 0
 
             return {
-                'market_id': market_data.get('id') or market_data.get('market_id'),
-                'title': market_data.get('title') or market_data.get('question', ''),
-                'description': market_data.get('description', ''),
-                'category': market_data.get('category') or market_data.get('tags', [''])[0],
+                'market_id': str(market_id),
+                'title': title,
+                'description': description,
+                'category': category,
                 'end_date': end_date,
                 'resolution_date': resolution_date,
-                'resolved': market_data.get('resolved', False),
+                'resolved': market_data.get('closed', False) or market_data.get('resolved', False),
                 'outcome': market_data.get('outcome'),
-                'total_volume': float(market_data.get('volume', 0)),
-                'holder_count': market_data.get('holder_count'),
-                'metadata': market_data
+                'total_volume': total_volume,
+                'holder_count': market_data.get('participants'),
+                'market_metadata': market_data
             }
         except Exception as e:
             logger.error(f"Error parsing market data: {e}")
@@ -183,9 +250,23 @@ class DataCollector:
         for trade_data in trades_data:
             parsed = self.parse_trade_data(trade_data)
             if parsed:
-                # Ensure market exists
-                if parsed['market_id']:
-                    self.ensure_market_exists(parsed['market_id'])
+                # Create market from embedded trade data
+                if parsed.get('market_data'):
+                    market_info = parsed['market_data']
+                    simple_market = {
+                        'market_id': market_info['market_id'],
+                        'title': market_info['title'],
+                        'category': market_info.get('category', ''),
+                        'description': '',
+                        'end_date': None,
+                        'resolution_date': None,
+                        'resolved': False,
+                        'outcome': market_info.get('outcome'),
+                        'total_volume': 0,
+                        'holder_count': None,
+                        'market_metadata': market_info
+                    }
+                    self.store_market(simple_market)
 
                 # Store trade
                 if self.store_trade(parsed):
