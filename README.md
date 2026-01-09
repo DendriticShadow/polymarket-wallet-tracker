@@ -25,3 +25,7 @@ Detect wallets with the following characteristics:
 
 ```
 ```
+
+## Dashboard
+<img width="1531" height="1224" alt="image" src="https://github.com/user-attachments/assets/2cfbfb14-1d8a-4092-9301-4bd69e053156" />
+
