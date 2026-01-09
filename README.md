@@ -1,4 +1,4 @@
-# Polymarket Wallet Activity Trackers
+# Polymarket Wallet Activity Tracker
 
 Detect potential insider trading patterns on Polymarket by flagging fresh wallets making large, well-timed bets on niche prediction markets.
 
