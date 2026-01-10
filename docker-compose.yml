@@ -1,0 +1,115 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15
+    container_name: polymarket_db
+    environment:
+      POSTGRES_DB: polymarket_tracker
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: changeme123
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./schema.sql:/docker-entrypoint-initdb.d/schema.sql
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U admin -d polymarket_tracker"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: polymarket_redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build: .
+    container_name: polymarket_api
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://admin:changeme123@postgres:5432/polymarket_tracker
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: polymarket_tracker
+      DB_USER: admin
+      DB_PASSWORD: changeme123
+      REDIS_URL: redis://redis:6379/0
+      API_HOST: 0.0.0.0
+      API_PORT: 8000
+      ENVIRONMENT: production
+      DEBUG: "False"
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./app:/app/app
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+  collector:
+    build: .
+    container_name: polymarket_collector
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://admin:changeme123@postgres:5432/polymarket_tracker
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: polymarket_tracker
+      DB_USER: admin
+      DB_PASSWORD: changeme123
+      COLLECTION_INTERVAL_SECONDS: 300
+      TRADES_FETCH_LIMIT: 1000
+    volumes:
+      - ./app:/app/app
+      - ./scripts:/app/scripts
+    command: python scripts/collector.py
+    restart: unless-stopped
+
+  detector:
+    build: .
+    container_name: polymarket_detector
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://admin:changeme123@postgres:5432/polymarket_tracker
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: polymarket_tracker
+      DB_USER: admin
+      DB_PASSWORD: changeme123
+      SUSPICIOUS_THRESHOLD: 20
+      FRESH_WALLET_DAYS: 30
+      FRESH_WALLET_MAX_TXS: 20
+      FRESH_WALLET_MAX_POSITION: 10000
+    volumes:
+      - ./app:/app/app
+      - ./scripts:/app/scripts
+    command: python scripts/detector.py
+    restart: unless-stopped
+
+  frontend:
+    build: ./frontend
+    container_name: polymarket_frontend
+    depends_on:
+      - api
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:8000
+    ports:
+      - "3000:3000"
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
